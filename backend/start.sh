@@ -1,3 +1,4 @@
 #!/bin/sh
-alembic upgrade head
+python -m alembic upgrade head
+python seed.py
 uvicorn main:app --host 0.0.0.0 --port $PORT
