@@ -210,7 +210,7 @@ Copy `.env.example` to `.env` and set at minimum:
 | `SECRET_KEY` | `dev-secret-key-…` | JWT signing key — **change in production** |
 | `ALLOWED_ORIGINS` | `http://localhost:5173,…` | Comma-separated CORS origins |
 | `DEBUG` | `true` | Set to `false` in production |
-| `DATABASE_URL` | SQLite at `./skillhub.db` | Override for external DB |
+| `DATABASE_URL` | SQLite at `./skillhub.db` | Railway sets this automatically; `postgres://` and `postgresql://` are both handled |
 | `UPLOAD_DIR` | `./uploads` | Where skill files are stored |
 
 Never commit `.env` to git.

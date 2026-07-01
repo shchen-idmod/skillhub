@@ -7,41 +7,46 @@ class Base(DeclarativeBase):
     pass
 
 
-def get_engine():
-    settings = get_settings()
-    is_sqlite = "sqlite" in settings.async_database_url
-    return create_async_engine(
-        settings.async_database_url,
-        echo=settings.debug,
-        connect_args={"check_same_thread": False} if is_sqlite else {},
-    )
+_settings = get_settings()
+_is_sqlite = "sqlite" in _settings.async_database_url
 
+# Single engine + pool shared across all requests
+engine = create_async_engine(
+    _settings.async_database_url,
+    echo=_settings.debug,
+    connect_args={"check_same_thread": False} if _is_sqlite else {},
+    # pool_pre_ping validates connections before use — prevents "connection closed"
+    # errors after Railway/Heroku drops idle connections
+    pool_pre_ping=not _is_sqlite,
+)
 
-def get_session_maker():
-    return async_sessionmaker(get_engine(), expire_on_commit=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def get_db() -> AsyncSession:
-    session_maker = get_session_maker()
-    async with session_maker() as session:
+    async with AsyncSessionLocal() as session:
         try:
             yield session
             await session.commit()
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()
 
 
 async def init_db():
-    engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    if _is_sqlite:
+        await _migrate_sqlite()
 
 
-# Keep these for backward compatibility
-settings = get_settings()
-is_sqlite = "sqlite" in settings.async_database_url
-engine = get_engine()
-AsyncSessionLocal = get_session_maker()
+async def _migrate_sqlite():
+    """Add columns to existing SQLite databases that predate schema changes."""
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        rows = await conn.execute(text("PRAGMA table_info(users)"))
+        existing = {row[1] for row in rows.fetchall()}
+        if "is_admin" not in existing:
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
+            ))
