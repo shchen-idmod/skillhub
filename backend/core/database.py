@@ -5,13 +5,14 @@ from core.config import get_settings
 
 settings = get_settings()
 
+is_sqlite = "sqlite" in settings.async_database_url
+
 engine = create_async_engine(
-    settings.database_url,
+    settings.async_database_url,
     echo=settings.debug,
-    connect_args={"check_same_thread": False},  # needed for SQLite
+    connect_args={"check_same_thread": False} if is_sqlite else {},
 )
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-
 
 class Base(DeclarativeBase):
     pass
