@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.database import Base
 from core.config import get_settings
-from models.models import User, Skill, SkillVersion
+from models.models import User, Skill, SkillVersion, Plugin, SkillRating, PluginRating  # noqa: F401 — ensures all tables are in metadata
 
 config = context.config
 
