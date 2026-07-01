@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+backend/venv
+
+
+
+# Packaging output
+dist/
+
+
+# Eval outputs and real fixtures (may contain PII)
+eval-results.json
+*.eval-results.json
+*.eval.log
+fixtures/real/
+.env
+.env.local
+
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+backend/venv/
+backend/*.db
+backend/data/
+backend/uploads/
+backend/.env
+frontend/node_modules/
+frontend/dist/
+data/
+**/skillhub.db
+backend.zip

@@ -1,0 +1,214 @@
+#!/usr/bin/env node
+import { program } from 'commander'
+import chalk from 'chalk'
+import ora from 'ora'
+import axios from 'axios'
+import fs from 'fs'
+import path from 'path'
+import { createWriteStream } from 'fs'
+import { pipeline } from 'stream/promises'
+
+const API_BASE = process.env.SKILLHUB_API ?? 'http://localhost:8000'
+const SKILLS_DIR = '.skillhub'
+
+const api = axios.create({ baseURL: API_BASE })
+
+function parseGithubUrl(url) {
+  if (!url) return null
+  try {
+    const u = new URL(url)
+    const parts = u.pathname.split('/').filter(Boolean)
+    if (parts.length < 4 || parts[2] !== 'tree') return null
+    const owner = parts[0]
+    const repo = parts[1]
+    const branch = parts[3]
+    const folderPath = parts.slice(4).join('/')
+    return { owner, repo, branch, folderPath }
+  } catch {
+    return null
+  }
+}
+
+async function fetchGithubFiles(owner, repo, branch, folderPath) {
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`
+  const response = await axios.get(apiUrl, {
+    headers: { Accept: 'application/vnd.github.v3+json' }
+  })
+  const prefix = folderPath ? folderPath + '/' : ''
+  return response.data.tree.filter(
+    item => item.type === 'blob' && item.path.startsWith(prefix)
+  ).map(item => ({
+    path: item.path,
+    relativePath: item.path.slice(prefix.length),
+    downloadUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${item.path}`
+  }))
+}
+
+program
+  .name('skills')
+  .description('SkillHub CLI')
+  .version('1.0.0')
+
+program
+  .command('add <skill>')
+  .description('Install a skill into the current project')
+  .option('--agent <agent>', 'Target agent', 'all')
+  .option('--dir <dir>', 'Install directory', SKILLS_DIR)
+  .action(async (skill, opts) => {
+    const parts = skill.split('/')
+    const namespace = parts[0]
+    const name = parts[1]
+    if (!namespace || !name) {
+      console.error(chalk.red('Skill must be in namespace/name format'))
+      process.exit(1)
+    }
+
+    const spinner = ora(`Resolving ${chalk.bold(skill)}`).start()
+
+    try {
+      const { data } = await api.get(`/skills/${namespace}/${name}`)
+      const githubUrl = data.github_url
+      const installDir = path.join(process.cwd(), opts.dir, namespace, name)
+      fs.mkdirSync(installDir, { recursive: true })
+
+      const parsed = parseGithubUrl(githubUrl)
+
+      if (parsed) {
+        spinner.text = 'Fetching files from GitHub...'
+        const files = await fetchGithubFiles(parsed.owner, parsed.repo, parsed.branch, parsed.folderPath)
+
+        if (!files.length) {
+          throw new Error('No files found at GitHub path: ' + githubUrl)
+        }
+
+        spinner.text = 'Downloading ' + files.length + ' file(s)...'
+
+        for (const file of files) {
+          const destPath = path.join(installDir, file.relativePath)
+          fs.mkdirSync(path.dirname(destPath), { recursive: true })
+          const fileResponse = await axios.get(file.downloadUrl, { responseType: 'stream' })
+          await pipeline(fileResponse.data, createWriteStream(destPath))
+        }
+
+        const manifest = {
+          slug: data.slug,
+          version: data.version,
+          source: githubUrl,
+          installedAt: new Date().toISOString(),
+          agent: opts.agent,
+          files: files.map(f => f.relativePath)
+        }
+        fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+
+        spinner.succeed(chalk.green('Installed ') + chalk.bold(skill) + ' -> ' + chalk.dim(path.relative(process.cwd(), installDir)))
+        console.log()
+        console.log(chalk.dim('  Source: ' + githubUrl))
+        console.log(chalk.dim('  Files:  ' + files.map(f => f.relativePath).join(', ')))
+
+      } else {
+        spinner.text = 'Downloading from registry...'
+        const installData = await api.get('/skills/' + namespace + '/' + name + '/install')
+        const fileResponse = await axios.get(installData.data.download_url, { responseType: 'stream' })
+        await pipeline(fileResponse.data, createWriteStream(path.join(installDir, 'SKILL.md')))
+
+        const manifest = {
+          slug: data.slug,
+          version: data.version,
+          source: 'skillhub-registry',
+          installedAt: new Date().toISOString(),
+          agent: opts.agent,
+          files: ['SKILL.md']
+        }
+        fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+
+        spinner.succeed(chalk.green('Installed ') + chalk.bold(skill))
+        console.log()
+        console.log(chalk.dim('  Source: SkillHub registry'))
+      }
+
+    } catch (err) {
+      const msg = (err.response && err.response.data && err.response.data.detail) || err.message
+      spinner.fail(chalk.red('Failed to install ' + skill + ': ' + msg))
+      process.exit(1)
+    }
+  })
+
+program
+  .command('list')
+  .description('List installed skills in this project')
+  .action(() => {
+    const baseDir = path.join(process.cwd(), SKILLS_DIR)
+    if (!fs.existsSync(baseDir)) {
+      console.log(chalk.dim('No skills installed yet.'))
+      return
+    }
+
+    const installed = []
+    const namespaces = fs.readdirSync(baseDir).filter(f => fs.statSync(path.join(baseDir, f)).isDirectory())
+    for (const ns of namespaces) {
+      const nsDir = path.join(baseDir, ns)
+      const skills = fs.readdirSync(nsDir).filter(f => fs.statSync(path.join(nsDir, f)).isDirectory())
+      for (const sk of skills) {
+        const manifestPath = path.join(nsDir, sk, 'manifest.json')
+        if (fs.existsSync(manifestPath)) {
+          const m = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'))
+          installed.push(m)
+        }
+      }
+    }
+
+    if (!installed.length) {
+      console.log(chalk.dim('No skills installed.'))
+      return
+    }
+
+    console.log(chalk.bold('\n  Installed skills (' + installed.length + ')\n'))
+    for (const s of installed) {
+      console.log('  ' + chalk.green('●') + ' ' + chalk.bold(s.slug) + ' ' + chalk.dim('v' + s.version))
+      console.log('    ' + chalk.dim('Source: ' + s.source))
+      console.log('    ' + chalk.dim('Agent:  ' + s.agent))
+      console.log()
+    }
+  })
+
+program
+  .command('remove <skill>')
+  .description('Remove an installed skill')
+  .action((skill) => {
+    const parts = skill.split('/')
+    const namespace = parts[0]
+    const name = parts[1]
+    const skillDir = path.join(process.cwd(), SKILLS_DIR, namespace, name)
+    if (!fs.existsSync(skillDir)) {
+      console.error(chalk.red('Skill not installed: ' + skill))
+      process.exit(1)
+    }
+    fs.rmSync(skillDir, { recursive: true })
+    console.log(chalk.green('Removed ' + skill))
+  })
+
+program
+  .command('search <query>')
+  .description('Search the skill registry')
+  .action(async (query) => {
+    const spinner = ora('Searching for ' + query + '...').start()
+    try {
+      const { data } = await api.get('/skills', { params: { q: query, page_size: 8 } })
+      spinner.stop()
+      if (!data.items.length) {
+        console.log(chalk.dim('No results for ' + query))
+        return
+      }
+      console.log(chalk.bold('\n  ' + data.total + ' results for ' + query + '\n'))
+      for (const s of data.items) {
+        console.log('  ' + chalk.green(s.slug) + ' ' + chalk.dim('v' + s.version))
+        console.log('  ' + chalk.dim(s.description.slice(0, 80)))
+        console.log('    ' + chalk.cyan('skills add ' + s.slug))
+        console.log()
+      }
+    } catch (err) {
+      spinner.fail(chalk.red('Search failed: ' + err.message))
+    }
+  })
+
+program.parse()
