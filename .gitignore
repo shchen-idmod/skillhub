@@ -39,6 +39,7 @@ backend/uploads/
 backend/.env
 frontend/node_modules/
 frontend/dist/
+cli/node_modules/
 data/
 **/skillhub.db
 backend.zip
