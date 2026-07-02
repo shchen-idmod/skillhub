@@ -5,8 +5,10 @@ import ora from 'ora'
 import axios from 'axios'
 import fs from 'fs'
 import path from 'path'
+import os from 'os'
 import { createWriteStream } from 'fs'
 import { pipeline } from 'stream/promises'
+import extractZip from 'extract-zip'
 
 const API_BASE = process.env.SKILLHUB_API ?? 'http://localhost:8000'
 const SKILLS_DIR = '.skillhub'
@@ -18,12 +20,14 @@ function parseGithubUrl(url) {
   try {
     const u = new URL(url)
     const parts = u.pathname.split('/').filter(Boolean)
-    if (parts.length < 4 || parts[2] !== 'tree') return null
+    if (parts.length < 2) return null
     const owner = parts[0]
     const repo = parts[1]
-    const branch = parts[3]
-    const folderPath = parts.slice(4).join('/')
-    return { owner, repo, branch, folderPath }
+    if (parts.length >= 4 && parts[2] === 'tree') {
+      return { owner, repo, branch: parts[3], folderPath: parts.slice(4).join('/') }
+    }
+    // Root repo URL — use HEAD
+    return { owner, repo, branch: 'HEAD', folderPath: '' }
   } catch {
     return null
   }
@@ -55,76 +59,89 @@ program
   .option('--agent <agent>', 'Target agent', 'all')
   .option('--dir <dir>', 'Install directory', SKILLS_DIR)
   .action(async (skill, opts) => {
-    const parts = skill.split('/')
-    const namespace = parts[0]
-    const name = parts[1]
-    if (!namespace || !name) {
-      console.error(chalk.red('Skill must be in namespace/name format'))
-      process.exit(1)
-    }
-
     const spinner = ora(`Resolving ${chalk.bold(skill)}`).start()
 
     try {
-      const { data } = await api.get(`/skills/${namespace}/${name}`)
-      const githubUrl = data.github_url
-      const installDir = path.join(process.cwd(), opts.dir, namespace, name)
+      let githubUrl = null
+      let registrySlug = null
+      let version = 'unknown'
+
+      // Determine source: GitHub URL or registry slug
+      if (skill.startsWith('https://github.com/')) {
+        githubUrl = skill
+      } else {
+        const parts = skill.split('/')
+        if (!parts[0] || !parts[1]) {
+          spinner.fail(chalk.red('Skill must be a GitHub URL or namespace/name format'))
+          process.exit(1)
+        }
+        registrySlug = skill
+        // Ask the registry — it may point us to GitHub
+        const { data: install } = await api.get(`/skills/${parts[0]}/${parts[1]}/install`)
+        version = install.version
+        githubUrl = install.github_url ?? null
+        if (!githubUrl && !install.download_url) {
+          throw new Error('No download source available for this skill')
+        }
+        if (!githubUrl) {
+          // Zip-backed registry skill
+          const installDir = path.join(process.cwd(), opts.dir, parts[0], parts[1])
+          fs.mkdirSync(installDir, { recursive: true })
+          spinner.text = 'Downloading from registry...'
+          const tmpZip = path.join(os.tmpdir(), `skillhub-${parts[0]}-${parts[1]}.zip`)
+          const res = await axios.get(install.download_url, { responseType: 'stream' })
+          await pipeline(res.data, createWriteStream(tmpZip))
+          spinner.text = 'Extracting...'
+          await extractZip(tmpZip, { dir: installDir })
+          fs.unlinkSync(tmpZip)
+          const installedFiles = install.files.length ? install.files
+            : fs.readdirSync(installDir).filter(f => f !== 'manifest.json')
+          const manifest = { slug: registrySlug, version, source: 'skillhub-registry',
+            installedAt: new Date().toISOString(), agent: opts.agent, files: installedFiles }
+          fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+          spinner.succeed(chalk.green('Installed ') + chalk.bold(skill) + ' from ' + chalk.cyan('registry'))
+          return
+        }
+      }
+
+      // GitHub path (direct URL or registry redirect)
+      const parsed = parseGithubUrl(githubUrl)
+      if (!parsed) throw new Error('Cannot parse GitHub URL: ' + githubUrl)
+
+      // Use the last folder name (or repo name for root installs) as the skill dir
+      const skillDirName = parsed.folderPath
+        ? parsed.folderPath.split('/').pop()
+        : parsed.repo
+      const installDir = path.join(process.cwd(), opts.dir, parsed.owner, skillDirName)
       fs.mkdirSync(installDir, { recursive: true })
 
-      const parsed = parseGithubUrl(githubUrl)
+      spinner.text = 'Fetching file list from GitHub...'
+      const files = await fetchGithubFiles(parsed.owner, parsed.repo, parsed.branch, parsed.folderPath)
+      if (!files.length) throw new Error('No files found at: ' + githubUrl)
 
-      if (parsed) {
-        spinner.text = 'Fetching files from GitHub...'
-        const files = await fetchGithubFiles(parsed.owner, parsed.repo, parsed.branch, parsed.folderPath)
-
-        if (!files.length) {
-          throw new Error('No files found at GitHub path: ' + githubUrl)
-        }
-
-        spinner.text = 'Downloading ' + files.length + ' file(s)...'
-
-        for (const file of files) {
-          const destPath = path.join(installDir, file.relativePath)
-          fs.mkdirSync(path.dirname(destPath), { recursive: true })
-          const fileResponse = await axios.get(file.downloadUrl, { responseType: 'stream' })
-          await pipeline(fileResponse.data, createWriteStream(destPath))
-        }
-
-        const manifest = {
-          slug: data.slug,
-          version: data.version,
-          source: githubUrl,
-          installedAt: new Date().toISOString(),
-          agent: opts.agent,
-          files: files.map(f => f.relativePath)
-        }
-        fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
-
-        spinner.succeed(chalk.green('Installed ') + chalk.bold(skill) + ' -> ' + chalk.dim(path.relative(process.cwd(), installDir)))
-        console.log()
-        console.log(chalk.dim('  Source: ' + githubUrl))
-        console.log(chalk.dim('  Files:  ' + files.map(f => f.relativePath).join(', ')))
-
-      } else {
-        spinner.text = 'Downloading from registry...'
-        const installData = await api.get('/skills/' + namespace + '/' + name + '/install')
-        const fileResponse = await axios.get(installData.data.download_url, { responseType: 'stream' })
-        await pipeline(fileResponse.data, createWriteStream(path.join(installDir, 'SKILL.md')))
-
-        const manifest = {
-          slug: data.slug,
-          version: data.version,
-          source: 'skillhub-registry',
-          installedAt: new Date().toISOString(),
-          agent: opts.agent,
-          files: ['SKILL.md']
-        }
-        fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
-
-        spinner.succeed(chalk.green('Installed ') + chalk.bold(skill))
-        console.log()
-        console.log(chalk.dim('  Source: SkillHub registry'))
+      spinner.text = `Downloading ${files.length} file(s) from GitHub...`
+      for (const file of files) {
+        const destPath = path.join(installDir, file.relativePath)
+        fs.mkdirSync(path.dirname(destPath), { recursive: true })
+        const res = await axios.get(file.downloadUrl, { responseType: 'stream' })
+        await pipeline(res.data, createWriteStream(destPath))
       }
+
+      const installedFiles = files.map(f => f.relativePath)
+      const manifest = {
+        slug: registrySlug ?? githubUrl,
+        version,
+        source: githubUrl,
+        installedAt: new Date().toISOString(),
+        agent: opts.agent,
+        files: installedFiles,
+      }
+      fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
+
+      spinner.succeed(chalk.green('Installed ') + chalk.bold(skill) + ' from ' + chalk.cyan('GitHub'))
+      console.log()
+      console.log(chalk.dim('  Source: ' + githubUrl))
+      console.log(chalk.dim('  Files:  ' + installedFiles.join(', ')))
 
     } catch (err) {
       const msg = (err.response && err.response.data && err.response.data.detail) || err.message
