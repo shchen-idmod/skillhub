@@ -125,7 +125,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('skill_id', sa.Integer(), nullable=False),
     sa.Column('version', sa.String(length=32), nullable=False),
-    sa.Column('s3_key', sa.String(length=512), nullable=False),
+    sa.Column('s3_key', sa.String(length=512), nullable=True),
     sa.Column('changelog', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(['skill_id'], ['skills.id'], ),
