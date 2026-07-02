@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { skillsApi } from '@/api/client'
+import type { GithubPrefetchResult } from '@/api/client'
 import { Button, Input, Textarea, Badge } from '@/components/ui'
 import { useAuthStore } from '@/hooks/useAuth'
 
@@ -27,6 +28,10 @@ export function PublishPage() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
   const [step, setStep] = useState<1 | 2 | 3>(1)
+  const [source, setSource] = useState<'upload' | 'github'>('upload')
+  const [githubUrl, setGithubUrl] = useState('')
+  const [githubFetching, setGithubFetching] = useState(false)
+  const [githubInfo, setGithubInfo] = useState<GithubPrefetchResult | null>(null)
 
   function set(field: string, value: string) {
     setForm((f) => ({ ...f, [field]: value }))
@@ -55,6 +60,27 @@ export function PublishPage() {
     setStep(2)
   }
 
+  async function fetchGithub() {
+    if (!githubUrl.trim()) return
+    setGithubFetching(true)
+    setErrors({})
+    try {
+      const { data } = await skillsApi.prefetchGithub(githubUrl.trim())
+      setGithubInfo(data)
+      setForm(f => ({
+        ...f,
+        name: data.name || f.name,
+        description: data.description || f.description,
+        github_url: data.github_url,
+      }))
+      if (data.topics.length > 0) setTags(data.topics)
+    } catch (err: any) {
+      setErrors({ github: err?.response?.data?.detail ?? 'Could not fetch repo — check the URL' })
+    } finally {
+      setGithubFetching(false)
+    }
+  }
+
   function validate() {
     const e: Record<string, string> = {}
     if (!form.name) e.name = 'Required'
@@ -62,7 +88,8 @@ export function PublishPage() {
     if (!form.namespace) e.namespace = 'Required'
     if (!form.description) e.description = 'Required'
     if (!form.domain) e.domain = 'Required'
-    if (!file) e.file = 'Upload a skill file'
+    if (source === 'upload' && !file) e.file = 'Upload a skill file'
+    if (source === 'github' && !githubInfo) e.github = 'Fetch a GitHub repo first'
     setErrors(e)
     return Object.keys(e).length === 0
   }
@@ -71,15 +98,34 @@ export function PublishPage() {
     if (!validate()) return
     setSubmitting(true)
     try {
-      const fd = new FormData()
-      Object.entries(form).forEach(([k, v]) => v && fd.append(k, v))
-      fd.append('tags', JSON.stringify(tags))
-      fd.append('supported_agents', JSON.stringify(agents))
-      fd.append('file', file!)
-      const { data } = await skillsApi.publish(fd)
-      navigate(`/skills/${data.slug}`)
+      if (source === 'github') {
+        const { data } = await skillsApi.importFromGithub({
+          github_url: githubInfo!.github_url,
+          name: form.name,
+          namespace: form.namespace,
+          description: form.description,
+          domain: form.domain,
+          audience: form.audience || undefined,
+          tags,
+          supported_agents: agents,
+          version: form.version,
+          license: form.license,
+        })
+        navigate(`/skills/${data.namespace}/${data.name}`)
+      } else {
+        const fd = new FormData()
+        Object.entries(form).forEach(([k, v]) => v && fd.append(k, v))
+        fd.append('tags', JSON.stringify(tags))
+        fd.append('supported_agents', JSON.stringify(agents))
+        fd.append('file', file!)
+        const { data } = await skillsApi.publish(fd)
+        navigate(`/skills/${data.namespace}/${data.name}`)
+      }
     } catch (err: any) {
-      const msg = err?.response?.data?.detail ?? 'Something went wrong'
+      const detail = err?.response?.data?.detail
+      const msg = Array.isArray(detail)
+        ? detail.map((e: any) => e.msg ?? JSON.stringify(e)).join('; ')
+        : (detail ?? err?.message ?? 'Something went wrong')
       setErrors({ submit: msg })
     } finally {
       setSubmitting(false)
@@ -192,39 +238,96 @@ export function PublishPage() {
             </div>
           </Section>
 
-          {/* File upload */}
+          {/* File / GitHub source */}
           <Section title="Skill files">
-            <div
-              onClick={() => fileRef.current?.click()}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
-              style={{
-                border: `1px dashed ${errors.file ? 'var(--color-danger)' : dragOver ? 'var(--color-accent)' : 'var(--color-border-hover)'}`,
-                borderRadius: 12, padding: '2rem', textAlign: 'center',
-                background: dragOver ? 'var(--color-accent-dim)' : 'var(--color-surface)',
-                cursor: 'pointer', transition: 'all 0.15s',
-              }}
-            >
-              <input ref={fileRef} type="file" accept=".md,.json,.zip" style={{ display: 'none' }}
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
-              <div style={{ fontSize: 28, marginBottom: 8 }}>📁</div>
-              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>Drop your skill files here</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Supports .md, .json, or a .zip folder — up to 10 MB</div>
+            {/* Source toggle */}
+            <div style={{ display: 'flex', gap: 0, border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius)', overflow: 'hidden', width: 'fit-content' }}>
+              {(['upload', 'github'] as const).map((s) => (
+                <button key={s} onClick={() => setSource(s)} style={{
+                  padding: '6px 16px', fontSize: 12, fontWeight: 500, border: 'none', cursor: 'pointer',
+                  background: source === s ? 'var(--color-accent)' : 'var(--color-surface)',
+                  color: source === s ? '#fff' : 'var(--color-text-secondary)',
+                  transition: 'all 0.15s',
+                }}>
+                  {s === 'upload' ? '📁 Upload file' : '🐙 From GitHub'}
+                </button>
+              ))}
             </div>
-            {file && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'var(--color-surface)', border: '0.5px solid rgba(56,161,105,0.4)', borderRadius: 'var(--radius)', marginTop: 10 }}>
-                <span style={{ color: '#38a169', fontSize: 16 }}>✓</span>
-                <span style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{file.name}</span>
-                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{(file.size / 1024).toFixed(1)} KB</span>
-                <button onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = '' }}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>✕</button>
-              </div>
+
+            {source === 'upload' ? (
+              <>
+                <div
+                  onClick={() => fileRef.current?.click()}
+                  onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f) }}
+                  style={{
+                    border: `1px dashed ${errors.file ? 'var(--color-danger)' : dragOver ? 'var(--color-accent)' : 'var(--color-border-hover)'}`,
+                    borderRadius: 12, padding: '2rem', textAlign: 'center',
+                    background: dragOver ? 'var(--color-accent-dim)' : 'var(--color-surface)',
+                    cursor: 'pointer', transition: 'all 0.15s',
+                  }}
+                >
+                  <input ref={fileRef} type="file" accept=".md,.json,.zip" style={{ display: 'none' }}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>📁</div>
+                  <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>Drop your skill files here</div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Supports .md, .json, or a .zip folder — up to 10 MB</div>
+                </div>
+                {file && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'var(--color-surface)', border: '0.5px solid rgba(56,161,105,0.4)', borderRadius: 'var(--radius)' }}>
+                    <span style={{ color: '#38a169', fontSize: 16 }}>✓</span>
+                    <span style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{file.name}</span>
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{(file.size / 1024).toFixed(1)} KB</span>
+                    <button onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = '' }}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}>✕</button>
+                  </div>
+                )}
+                {errors.file && <div style={{ fontSize: 11, color: 'var(--color-danger)' }}>{errors.file}</div>}
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  Your skill must include a <code style={{ fontFamily: 'var(--font-mono)' }}>SKILL.md</code> as the entry point.
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <Input
+                      placeholder="https://github.com/owner/repo"
+                      value={githubUrl}
+                      onChange={(e) => { setGithubUrl(e.target.value); setGithubInfo(null) }}
+                      onKeyDown={(e) => e.key === 'Enter' && fetchGithub()}
+                      error={errors.github}
+                    />
+                  </div>
+                  <Button variant="secondary" onClick={fetchGithub} loading={githubFetching}>
+                    Fetch info
+                  </Button>
+                </div>
+                {githubInfo && (
+                  <div style={{ padding: '10px 12px', background: 'var(--color-surface)', border: '0.5px solid rgba(56,161,105,0.4)', borderRadius: 'var(--radius)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span style={{ color: '#38a169', fontSize: 14 }}>✓</span>
+                      <span style={{ fontSize: 13, fontWeight: 500, fontFamily: 'var(--font-mono)' }}>
+                        {githubInfo.owner}/{githubInfo.repo}
+                        {githubInfo.path && <span style={{ color: 'var(--color-accent)' }}>/{githubInfo.path}</span>}
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>★ {githubInfo.stars.toLocaleString()}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                      {githubInfo.path ? `Subfolder README fetched` : `Repo README fetched`} — will be used as skill content.
+                      {githubInfo.topics.length > 0 && ` Topics auto-filled as tags.`}
+                    </div>
+                  </div>
+                )}
+                {errors.github && !githubInfo && (
+                  <div style={{ fontSize: 11, color: 'var(--color-danger)' }}>{errors.github}</div>
+                )}
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  The repo's README will be used as the skill content. The repo must be public.
+                </div>
+              </>
             )}
-            {errors.file && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>{errors.file}</div>}
-            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 6 }}>
-              Your skill must include a <code style={{ fontFamily: 'var(--font-mono)' }}>SKILL.md</code> as the entry point.
-            </div>
           </Section>
 
           {/* Publishing options */}

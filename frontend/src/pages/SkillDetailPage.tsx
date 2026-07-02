@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
+import rehypeSanitize from 'rehype-sanitize'
 import { skillsApi } from '@/api/client'
 import { Badge, Avatar, Spinner, Card } from '@/components/ui'
 import { useAuthStore } from '@/hooks/useAuth'
@@ -16,7 +18,7 @@ export function SkillDetailPage() {
   const { user } = useAuthStore()
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'readme' | 'versions' | 'deps'>('readme')
-  const [activeAgent, setActiveAgent] = useState('All Agents')
+  const [activeAgent, setActiveAgent] = useState('Claude Code')
   const [copied, setCopied] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -74,7 +76,8 @@ export function SkillDetailPage() {
   }
 
   const agentFlag = AGENT_CMDS[activeAgent] ?? ''
-  const installCmd = `npx skills add ${skill.slug}${agentFlag ? ' ' + agentFlag : ''}`
+  const installTarget = skill.github_url ?? skill.slug
+  const installCmd = `npx skills add ${installTarget}${agentFlag ? ' ' + agentFlag : ''}`
 
   function copy() {
     navigator.clipboard.writeText(installCmd)
@@ -194,21 +197,23 @@ export function SkillDetailPage() {
                   padding: '8px 16px', fontSize: 13, background: 'none', border: 'none', cursor: 'pointer',
                   color: activeTab === tab ? 'var(--color-text)' : 'var(--color-text-secondary)',
                   borderBottom: `2px solid ${activeTab === tab ? 'var(--color-accent)' : 'transparent'}`,
-                  marginBottom: -1, textTransform: 'capitalize',
+                  marginBottom: -1, textTransform: tab === 'readme' ? 'none' : 'capitalize',
                 }}
               >
-                {tab === 'deps' ? 'Dependencies' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                {tab === 'readme' ? 'SKILL.md' : tab === 'deps' ? 'Dependencies' : tab.charAt(0).toUpperCase() + tab.slice(1)}
               </button>
             ))}
           </div>
 
           {/* Tab panels */}
           {activeTab === 'readme' && (
-            <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.7 }}>
+            <div style={{ fontSize: 13, lineHeight: 1.7 }}>
               {skill.readme ? (
-                <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'var(--font-sans)' }}>{skill.readme}</pre>
+                <div className="markdown-body">
+                  <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{skill.readme}</ReactMarkdown>
+                </div>
               ) : (
-                <div style={{ color: 'var(--color-text-muted)' }}>No readme provided.</div>
+                <div style={{ color: 'var(--color-text-muted)' }}>No SKILL.md provided.</div>
               )}
             </div>
           )}
@@ -284,6 +289,7 @@ export function SkillDetailPage() {
               </button>
             </div>
             <button
+              onClick={copy}
               style={{
                 width: '100%', padding: '8px 0', borderRadius: 'var(--radius)',
                 border: '0.5px solid var(--color-accent)',
@@ -291,7 +297,7 @@ export function SkillDetailPage() {
                 fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
               }}
             >
-              Install this skill
+              {copied ? 'Copied!' : 'Copy install'}
             </button>
           </Card>
 

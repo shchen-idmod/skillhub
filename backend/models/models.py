@@ -137,7 +137,7 @@ class SkillVersion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id"))
     version: Mapped[str] = mapped_column(String(32))
-    s3_key: Mapped[str] = mapped_column(String(512))
+    s3_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     changelog: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

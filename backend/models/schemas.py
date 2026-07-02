@@ -149,7 +149,8 @@ class SkillListResponse(BaseModel):
 class InstallResponse(BaseModel):
     slug: str
     version: str
-    download_url: str
+    download_url: Optional[str] = None  # zip-backed skills only
+    github_url: Optional[str] = None    # GitHub-sourced skills only
     files: list[str]
     install_count: int
 

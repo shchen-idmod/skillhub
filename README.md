@@ -60,6 +60,25 @@ skillhub/
 
 ## Development
 
+### Run frontend locally (no Docker)
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Opens at **http://localhost:5173**. The Vite dev server automatically proxies `/api` requests to `http://localhost:8000`, so the backend must be running separately (see options below).
+
+If your backend is on a different port, set `VITE_API_URL` before starting:
+
+```powershell
+$env:VITE_API_URL = "http://localhost:8080"
+npm run dev
+```
+
+---
+
 ### Option A — full Docker (recommended first run)
 
 ```powershell
@@ -72,31 +91,29 @@ docker-compose up --build
 | Backend API | http://localhost:8000 |
 | API docs (Swagger) | http://localhost:8000/docs |
 
-### Option B — backend in Docker, frontend local (easier debugging)
+### Option B — backend in Docker, frontend local (easier frontend debugging)
 
 ```powershell
-# Terminal 1
+# Terminal 1 — backend only
 docker-compose up backend
 
-# Terminal 2
+# Terminal 2 — frontend local
 cd frontend
 npm install
 npm run dev
 ```
 
-The Vite dev server proxies `/api` to `http://localhost:8000` automatically.
-
-### Option C — fully local
+### Option C — fully local (no Docker)
 
 ```powershell
-# Backend
+# Terminal 1 — backend
 cd backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --reload
 
-# Frontend (separate terminal)
+# Terminal 2 — frontend
 cd frontend
 npm install
 npm run dev

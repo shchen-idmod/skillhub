@@ -1,7 +1,9 @@
-import zipfile
-import io
+import re
+import base64
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from pydantic import BaseModel as PydanticBaseModel
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, update
 from sqlalchemy.orm import selectinload
@@ -290,15 +292,22 @@ async def install_skill(
     # Increment install count
     skill.install_count += 1
 
-    s3_key = skill.s3_key
-    download_url = await get_presigned_url(s3_key)
-    file_list = await list_files(f"skills/{slug}/")
+    if skill.s3_key:
+        # Zip-backed skill: return presigned download URL
+        download_url = await get_presigned_url(skill.s3_key)
+        file_list = await list_files(f"skills/{slug}/")
+        files = [k.split("/")[-1] for k in file_list]
+    else:
+        # GitHub-sourced skill: CLI fetches directly from GitHub
+        download_url = None
+        files = []
 
     return InstallResponse(
         slug=slug,
         version=skill.version,
         download_url=download_url,
-        files=[k.split("/")[-1] for k in file_list],
+        github_url=skill.github_url,
+        files=files,
         install_count=skill.install_count,
     )
 
@@ -359,6 +368,223 @@ async def get_my_rating(
     )).scalar_one_or_none()
 
     return {"score": rating.score if rating else None}
+
+
+def _extract_description_from_md(content: str) -> str:
+    """Extract a short description from SKILL.md or README.md.
+
+    Checks YAML frontmatter 'description:' first, then falls back to the
+    first plain-text paragraph (skipping headings and block elements).
+    """
+    if not content:
+        return ""
+
+    # YAML frontmatter: --- ... ---
+    fm = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+    if fm:
+        m = re.search(r'^description:\s*["\']?(.+?)["\']?\s*$', fm.group(1), re.MULTILINE)
+        if m:
+            return m.group(1).strip()[:280]
+
+    # First non-heading, non-block paragraph
+    paragraph: list[str] = []
+    for line in content.splitlines():
+        s = line.strip()
+        if not s:
+            if paragraph:
+                break
+            continue
+        if s.startswith(('#', '>', '!', '|', '```', '---', '===')):
+            if paragraph:
+                break
+            continue
+        paragraph.append(s)
+
+    return ' '.join(paragraph)[:280] if paragraph else ""
+
+
+def _parse_github_url(url: str) -> tuple[str, str, Optional[str], Optional[str]]:
+    """Parse a GitHub URL into (owner, repo, branch, subfolder_path).
+
+    Handles:
+      https://github.com/owner/repo
+      https://github.com/owner/repo/tree/main
+      https://github.com/owner/repo/tree/main/path/to/skill
+    """
+    m = re.match(
+        r'https?://github\.com/([^/\s]+)/([^/\s.]+?)(?:\.git)?'
+        r'(?:/tree/([^/\s]+)(?:/(.+?))?)?/?$',
+        url.strip(),
+    )
+    if not m:
+        raise HTTPException(
+            400,
+            detail="Invalid GitHub URL — use https://github.com/owner/repo or …/tree/branch/path",
+        )
+    return m.group(1), m.group(2), m.group(3), m.group(4)
+
+
+async def _fetch_folder_readme(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    branch: Optional[str],
+    path: Optional[str],
+    headers: dict,
+) -> Optional[str]:
+    """Fetch just the README/SKILL.md for form pre-fill preview. Fast — single file only."""
+    if path:
+        ref = f"?ref={branch}" if branch else ""
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{path}{ref}",
+            headers=headers,
+        )
+        if not resp.is_success or not isinstance(resp.json(), list):
+            return None
+        readme_file = next(
+            (f for f in resp.json() if f["name"].upper() in ("SKILL.MD", "README.MD", "README.TXT")),
+            None,
+        )
+        if not readme_file:
+            return None
+        file_resp = await client.get(readme_file["url"], headers=headers)
+        if not file_resp.is_success:
+            return None
+        return base64.b64decode(file_resp.json()["content"]).decode("utf-8", errors="replace")
+    else:
+        ref = f"?ref={branch}" if branch else ""
+        # Prefer SKILL.md over generic README at the repo root
+        for candidate in ("SKILL.md", "SKILL.MD"):
+            c_resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/contents/{candidate}{ref}",
+                headers=headers,
+            )
+            if c_resp.is_success and c_resp.json().get("encoding") == "base64":
+                return base64.b64decode(c_resp.json()["content"]).decode("utf-8", errors="replace")
+        # Fall back to whatever GitHub considers the default README
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/readme{ref}",
+            headers=headers,
+        )
+        if not resp.is_success:
+            return None
+        return base64.b64decode(resp.json()["content"]).decode("utf-8", errors="replace")
+
+
+
+@router.get("/prefetch-github")
+async def prefetch_github(url: str = Query(...)):
+    """Fetch GitHub repo or subfolder metadata to pre-fill the publish form. No auth required."""
+    owner, repo, branch, path = _parse_github_url(url)
+    headers = {"Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}
+    if settings.github_token:
+        headers["Authorization"] = f"Bearer {settings.github_token}"
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        repo_resp = await client.get(f"https://api.github.com/repos/{owner}/{repo}", headers=headers)
+        if repo_resp.status_code == 404:
+            raise HTTPException(404, detail="GitHub repository not found or private")
+        if not repo_resp.is_success:
+            raise HTTPException(502, detail="GitHub API error — try again")
+        repo_data = repo_resp.json()
+
+        readme = await _fetch_folder_readme(client, owner, repo, branch, path, headers)
+
+    # Use folder name as suggested skill name when a subfolder is specified
+    if path:
+        folder_name = path.rstrip("/").split("/")[-1]
+        suggested_name = re.sub(r"[^a-z0-9-]", "-", folder_name.lower()).strip("-")
+    else:
+        suggested_name = re.sub(r"[^a-z0-9-]", "-", repo.lower()).strip("-")
+
+    canonical_url = f"https://github.com/{owner}/{repo}"
+    if branch and path:
+        canonical_url += f"/tree/{branch}/{path}"
+    elif branch:
+        canonical_url += f"/tree/{branch}"
+
+    # Prefer description extracted from SKILL.md/README.md over the (often empty) repo description
+    md_description = _extract_description_from_md(readme or "")
+    description = md_description or (repo_data.get("description") or "")[:280]
+
+    return {
+        "name": suggested_name,
+        "description": description,
+        "readme": readme,
+        "topics": repo_data.get("topics", [])[:8],
+        "stars": repo_data.get("stargazers_count", 0),
+        "owner": owner,
+        "repo": repo,
+        "path": path,
+        "github_url": canonical_url,
+    }
+
+
+class GithubImportBody(PydanticBaseModel):
+    github_url: str
+    name: str
+    namespace: str
+    description: str
+    domain: str
+    audience: Optional[str] = None
+    tags: list[str] = []
+    supported_agents: list[str] = ["All Agents"]
+    version: str = "1.0.0"
+    license: str = "Apache 2.0"
+
+
+@router.post("/import-github", response_model=SkillOut, status_code=201)
+async def import_from_github(
+    body: GithubImportBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Register a GitHub-hosted skill without downloading any files.
+
+    Fetches SKILL.md to store as readme. CLI fetches all files at install time.
+    """
+    slug = f"{body.namespace}/{body.name}"
+    if (await db.execute(select(Skill).where(Skill.slug == slug))).scalar_one_or_none():
+        raise HTTPException(409, detail=f"Skill '{slug}' already exists")
+
+    owner, repo, branch, path = _parse_github_url(body.github_url)
+    headers = {"Accept": "application/vnd.github.v3+json", "X-GitHub-Api-Version": "2022-11-28"}
+    if settings.github_token:
+        headers["Authorization"] = f"Bearer {settings.github_token}"
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        readme = await _fetch_folder_readme(client, owner, repo, branch, path, headers)
+
+    skill = Skill(
+        name=body.name,
+        namespace=body.namespace,
+        slug=slug,
+        description=body.description,
+        readme=readme,
+        domain=body.domain,
+        audience=body.audience,
+        tags=body.tags,
+        supported_agents=body.supported_agents,
+        version=body.version,
+        license=body.license,
+        github_url=body.github_url,
+        s3_key=None,
+        file_size_kb=None,
+        is_published=True,
+        author_id=current_user.id,
+    )
+    db.add(skill)
+    await db.flush()
+
+    db.add(SkillVersion(skill_id=skill.id, version=body.version, s3_key=""))
+    await db.flush()
+
+    result = await db.execute(
+        select(Skill)
+        .options(selectinload(Skill.author), selectinload(Skill.versions))
+        .where(Skill.id == skill.id)
+    )
+    return result.scalar_one()
 
 
 @router.get("/domains/list")
