@@ -1,10 +1,10 @@
 {
-  "name": "skills-cli",
-  "version": "1.0.0",
+  "name": "gf-skillhub-cli",
+  "version": "1.0.4",
   "description": "Install AI agent skills from SkillHub",
   "type": "module",
   "bin": {
-    "skills": "./src/index.js"
+    "gf-skillhub-cli": "bin/skillhub.js"
   },
   "scripts": {
     "dev": "node src/index.js"

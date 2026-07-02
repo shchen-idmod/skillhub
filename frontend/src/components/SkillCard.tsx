@@ -48,7 +48,7 @@ export function SkillCard({ skill }: { skill: SkillListItem }) {
 
   function copyInstall(e: React.MouseEvent) {
     e.stopPropagation()
-    navigator.clipboard.writeText(`npx skills add ${skill.slug}`)
+    navigator.clipboard.writeText(`npx gf-skillhub-cli add ${skill.slug}`)
   }
 
   const deleteMutation = useMutation({

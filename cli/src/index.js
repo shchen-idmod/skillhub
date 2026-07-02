@@ -10,7 +10,7 @@ import { createWriteStream } from 'fs'
 import { pipeline } from 'stream/promises'
 import extractZip from 'extract-zip'
 
-const API_BASE = process.env.SKILLHUB_API ?? 'http://localhost:8000'
+const API_BASE = process.env.SKILLHUB_API ?? 'https://skillhub-production-7de0.up.railway.app'
 const SKILLS_DIR = '.skillhub'
 
 const api = axios.create({ baseURL: API_BASE })
@@ -26,7 +26,6 @@ function parseGithubUrl(url) {
     if (parts.length >= 4 && parts[2] === 'tree') {
       return { owner, repo, branch: parts[3], folderPath: parts.slice(4).join('/') }
     }
-    // Root repo URL — use HEAD
     return { owner, repo, branch: 'HEAD', folderPath: '' }
   } catch {
     return null
@@ -48,15 +47,21 @@ async function fetchGithubFiles(owner, repo, branch, folderPath) {
   }))
 }
 
+function fail(spinner, msg) {
+  spinner.stop()
+  console.error(chalk.red('✖ ' + msg))
+  process.exitCode = 1
+}
+
 program
-  .name('skills')
+  .name('gf-skillhub-cli')
   .description('SkillHub CLI')
-  .version('1.0.0')
+  .version('1.0.4')
 
 program
   .command('add <skill>')
   .description('Install a skill into the current project')
-  .option('--agent <agent>', 'Target agent', 'all')
+  .option('--agent <agent>', 'Target agent (e.g. claude-code)', 'all')
   .option('--dir <dir>', 'Install directory', SKILLS_DIR)
   .action(async (skill, opts) => {
     const spinner = ora(`Resolving ${chalk.bold(skill)}`).start()
@@ -66,25 +71,40 @@ program
       let registrySlug = null
       let version = 'unknown'
 
-      // Determine source: GitHub URL or registry slug
       if (skill.startsWith('https://github.com/')) {
         githubUrl = skill
       } else {
         const parts = skill.split('/')
         if (!parts[0] || !parts[1]) {
-          spinner.fail(chalk.red('Skill must be a GitHub URL or namespace/name format'))
-          process.exit(1)
+          fail(spinner, 'Skill must be a GitHub URL or namespace/name format')
+          return
         }
         registrySlug = skill
-        // Ask the registry — it may point us to GitHub
-        const { data: install } = await api.get(`/skills/${parts[0]}/${parts[1]}/install`)
-        version = install.version
-        githubUrl = install.github_url ?? null
-        if (!githubUrl && !install.download_url) {
-          throw new Error('No download source available for this skill')
+
+        let install
+        try {
+          const res = await api.get(`/skills/${parts[0]}/${parts[1]}/install`)
+          install = res.data
+        } catch (err) {
+          const status = err.response?.status
+          if (status === 404) {
+            fail(spinner, `Skill "${skill}" not found in registry at ${API_BASE}\n  Set SKILLHUB_API=<your-backend-url> if using a remote registry.`)
+          } else if (!err.response) {
+            fail(spinner, `Cannot connect to registry at ${API_BASE}\n  Set SKILLHUB_API=<your-backend-url> to use a remote registry.`)
+          } else {
+            fail(spinner, `Registry error: ${err.response?.data?.detail ?? err.message}`)
+          }
+          return
         }
-        if (!githubUrl) {
-          // Zip-backed registry skill
+
+        version = install.version
+        if (!install.download_url && !install.github_url) {
+          fail(spinner, 'No download source available for this skill')
+          return
+        }
+
+        githubUrl = install.download_url ? null : (install.github_url ?? null)
+        if (install.download_url) {
           const installDir = path.join(process.cwd(), opts.dir, parts[0], parts[1])
           fs.mkdirSync(installDir, { recursive: true })
           spinner.text = 'Downloading from registry...'
@@ -94,21 +114,24 @@ program
           spinner.text = 'Extracting...'
           await extractZip(tmpZip, { dir: installDir })
           fs.unlinkSync(tmpZip)
-          const installedFiles = install.files.length ? install.files
+          const installedFiles = install.files?.length ? install.files
             : fs.readdirSync(installDir).filter(f => f !== 'manifest.json')
-          const manifest = { slug: registrySlug, version, source: 'skillhub-registry',
-            installedAt: new Date().toISOString(), agent: opts.agent, files: installedFiles }
+          const manifest = {
+            slug: registrySlug, version, source: 'skillhub-registry',
+            installedAt: new Date().toISOString(), agent: opts.agent, files: installedFiles
+          }
           fs.writeFileSync(path.join(installDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
           spinner.succeed(chalk.green('Installed ') + chalk.bold(skill) + ' from ' + chalk.cyan('registry'))
           return
         }
       }
 
-      // GitHub path (direct URL or registry redirect)
       const parsed = parseGithubUrl(githubUrl)
-      if (!parsed) throw new Error('Cannot parse GitHub URL: ' + githubUrl)
+      if (!parsed) {
+        fail(spinner, 'Cannot parse GitHub URL: ' + githubUrl)
+        return
+      }
 
-      // Use the last folder name (or repo name for root installs) as the skill dir
       const skillDirName = parsed.folderPath
         ? parsed.folderPath.split('/').pop()
         : parsed.repo
@@ -117,7 +140,10 @@ program
 
       spinner.text = 'Fetching file list from GitHub...'
       const files = await fetchGithubFiles(parsed.owner, parsed.repo, parsed.branch, parsed.folderPath)
-      if (!files.length) throw new Error('No files found at: ' + githubUrl)
+      if (!files.length) {
+        fail(spinner, 'No files found at: ' + githubUrl)
+        return
+      }
 
       spinner.text = `Downloading ${files.length} file(s) from GitHub...`
       for (const file of files) {
@@ -144,9 +170,15 @@ program
       console.log(chalk.dim('  Files:  ' + installedFiles.join(', ')))
 
     } catch (err) {
-      const msg = (err.response && err.response.data && err.response.data.detail) || err.message
-      spinner.fail(chalk.red('Failed to install ' + skill + ': ' + msg))
-      process.exit(1)
+      const status = err.response?.status
+      if (status === 404) {
+        fail(spinner, `Skill "${skill}" not found in registry at ${API_BASE}`)
+      } else if (!err.response) {
+        fail(spinner, `Cannot connect to registry at ${API_BASE}\n  Set SKILLHUB_API=<your-backend-url> to override.`)
+      } else {
+        const msg = err.response?.data?.detail || err.message || `HTTP ${status}`
+        fail(spinner, 'Failed to install ' + skill + ': ' + msg)
+      }
     }
   })
 
@@ -193,12 +225,11 @@ program
   .description('Remove an installed skill')
   .action((skill) => {
     const parts = skill.split('/')
-    const namespace = parts[0]
-    const name = parts[1]
-    const skillDir = path.join(process.cwd(), SKILLS_DIR, namespace, name)
+    const skillDir = path.join(process.cwd(), SKILLS_DIR, parts[0], parts[1])
     if (!fs.existsSync(skillDir)) {
       console.error(chalk.red('Skill not installed: ' + skill))
-      process.exit(1)
+      process.exitCode = 1
+      return
     }
     fs.rmSync(skillDir, { recursive: true })
     console.log(chalk.green('Removed ' + skill))
@@ -220,11 +251,11 @@ program
       for (const s of data.items) {
         console.log('  ' + chalk.green(s.slug) + ' ' + chalk.dim('v' + s.version))
         console.log('  ' + chalk.dim(s.description.slice(0, 80)))
-        console.log('    ' + chalk.cyan('skills add ' + s.slug))
+        console.log('    ' + chalk.cyan('npx skills-cli add ' + s.slug))
         console.log()
       }
     } catch (err) {
-      spinner.fail(chalk.red('Search failed: ' + err.message))
+      fail(spinner, 'Search failed: ' + err.message)
     }
   })
 

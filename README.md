@@ -231,3 +231,37 @@ Copy `.env.example` to `.env` and set at minimum:
 | `UPLOAD_DIR` | `./uploads` | Where skill files are stored |
 
 Never commit `.env` to git.
+
+---
+
+## CLI
+
+Users install skills with:
+
+```
+npx gf-skillhub-cli add <namespace>/<skill> --agent claude-code
+```
+
+The CLI points to `https://skillhub-production-7de0.up.railway.app` by default. Override with `SKILLHUB_API` for local testing:
+
+```powershell
+$env:SKILLHUB_API = "http://localhost/api"
+npx gf-skillhub-cli add admin/my-skill
+```
+
+### Publishing a new CLI version
+
+1. Make your changes in `cli/src/index.js`
+2. Bump the version in `cli/package.json` and in the `.version()` call in `src/index.js`
+3. Publish to npm:
+
+```powershell
+cd cli
+npm publish --//registry.npmjs.org/:_authToken=<your-npm-token>
+```
+
+To get a publish token:
+- Go to **npmjs.com → profile → Access Tokens → Generate New Token → Granular Access Token**
+- Set **Packages: Read and write → All packages**
+- Enable **Bypass two-factor authentication**
+- Use the generated token in the publish command above

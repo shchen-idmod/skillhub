@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { skillsApi } from '@/api/client'
 import type { GithubPrefetchResult } from '@/api/client'
@@ -28,6 +28,12 @@ export function PublishPage() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
   const [step, setStep] = useState<1 | 2 | 3>(1)
+
+  useEffect(() => {
+    if (user?.username && !form.namespace) {
+      setForm(f => ({ ...f, namespace: user.username }))
+    }
+  }, [user?.username])
   const [source, setSource] = useState<'upload' | 'github'>('upload')
   const [githubUrl, setGithubUrl] = useState('')
   const [githubFetching, setGithubFetching] = useState(false)
@@ -371,7 +377,7 @@ export function PublishPage() {
             {!form.domain && !tags.length && <Badge color="gray">tag</Badge>}
           </div>
           <div style={{ borderTop: '0.5px solid var(--color-border)', paddingTop: 8, fontSize: 10, color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)' }}>
-            npx skills add {form.namespace || '—'}/{form.name || '—'}
+            npx gf-skillhub-cli add {form.namespace || '—'}/{form.name || '—'}
           </div>
         </div>
       </div>

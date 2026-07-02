@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # Optional GitHub token — raises rate limit from 60 to 5000 req/hour
     github_token: str = ""
 
+    # Public-facing URL for the backend API — used to build local download URLs.
+    # Override in prod (e.g. http://yourdomain.com/api) when behind a reverse proxy.
+    public_api_url: str = "http://localhost:8000"
+
     @property
     def async_database_url(self) -> str:
         url = self.database_url

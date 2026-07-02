@@ -76,8 +76,10 @@ export function SkillDetailPage() {
   }
 
   const agentFlag = AGENT_CMDS[activeAgent] ?? ''
-  const installTarget = skill.github_url ?? skill.slug
-  const installCmd = `npx skills add ${installTarget}${agentFlag ? ' ' + agentFlag : ''}`
+  const hasZip = !skill.github_url
+  const installCmd = hasZip
+    ? `npx gf-skillhub-cli add ${skill.slug}${agentFlag ? ' ' + agentFlag : ''}`
+    : `npx skills add ${skill.github_url}${agentFlag ? ' ' + agentFlag : ''}`
 
   function copy() {
     navigator.clipboard.writeText(installCmd)
@@ -161,9 +163,11 @@ export function SkillDetailPage() {
             </div>
           </div>
 
-          <p style={{ fontSize: 14, color: 'var(--color-text-secondary)', lineHeight: 1.65, marginBottom: '1rem' }}>
-            {skill.description}
-          </p>
+          {skill.description && (
+            <p style={{ fontSize: 14, color: 'var(--color-text-secondary)', lineHeight: 1.65, marginBottom: '1rem' }}>
+              {skill.description.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1').replace(/`([^`]+)`/g, '$1').trim()}
+            </p>
+          )}
 
           {/* Tags */}
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: '1rem' }}>
@@ -206,17 +210,25 @@ export function SkillDetailPage() {
           </div>
 
           {/* Tab panels */}
-          {activeTab === 'readme' && (
-            <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-              {skill.readme ? (
-                <div className="markdown-body">
-                  <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{skill.readme}</ReactMarkdown>
-                </div>
-              ) : (
-                <div style={{ color: 'var(--color-text-muted)' }}>No SKILL.md provided.</div>
-              )}
-            </div>
-          )}
+          {activeTab === 'readme' && (() => {
+            if (!skill.readme) return <div style={{ color: 'var(--color-text-muted)' }}>No SKILL.md provided.</div>
+            const fmMatch = skill.readme.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/)
+            const meta = fmMatch ? fmMatch[1].trim() : null
+            const body = (fmMatch ? fmMatch[2] : skill.readme).trim()
+            return (
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--color-text-secondary)' }}>
+                <div style={{ fontWeight: 600, fontSize: '1.4em', color: 'var(--color-text)', marginBottom: '0.75em' }}>{skill.name}</div>
+                {meta && (
+                  <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: '0 0 1.5em', fontSize: 'inherit', lineHeight: 'inherit' }}>{meta}</pre>
+                )}
+                {body && (
+                  <div className="markdown-body">
+                    <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{body}</ReactMarkdown>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
 
           {activeTab === 'versions' && (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>

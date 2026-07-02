@@ -117,7 +117,7 @@ export function Navbar() {
           color: 'var(--color-text-secondary)', whiteSpace: 'nowrap',
         }}
       >
-        <span style={{ color: 'var(--color-accent)' }}>$</span> npx skills add &lt;name&gt;
+        <span style={{ color: 'var(--color-accent)' }}>$</span> npx gf-skillhub-cli add &lt;name&gt;
       </div>
 
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>

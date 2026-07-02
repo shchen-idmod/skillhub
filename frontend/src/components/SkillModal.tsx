@@ -14,7 +14,9 @@ export function SkillModal({ skill, onClose }: { skill: SkillListItem; onClose: 
   const [copied, setCopied] = useState(false)
 
   const flag = AGENT_CMDS[activeAgent] ?? ''
-  const cmd = `npx skills add ${skill.slug}${flag ? ' ' + flag : ''}`
+  const cmd = skill.github_url
+    ? `npx skills add ${skill.github_url}${flag ? ' ' + flag : ''}`
+    : `npx gf-skillhub-cli add ${skill.slug}${flag ? ' ' + flag : ''}`
 
   function copy() {
     navigator.clipboard.writeText(cmd)
