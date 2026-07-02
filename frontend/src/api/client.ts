@@ -62,6 +62,31 @@ export interface User {
   created_at: string
 }
 
+export interface GithubPrefetchResult {
+  name: string
+  description: string
+  readme: string | null
+  topics: string[]
+  stars: number
+  owner: string
+  repo: string
+  path: string | null
+  github_url: string
+}
+
+export interface GithubImportPayload {
+  github_url: string
+  name: string
+  namespace: string
+  description: string
+  domain: string
+  audience?: string
+  tags: string[]
+  supported_agents: string[]
+  version: string
+  license: string
+}
+
 // API functions
 export const skillsApi = {
   list: (params: Record<string, string | number | undefined>) =>
@@ -95,6 +120,12 @@ export const skillsApi = {
     api.get<{ score: number | null }>(`/skills/${namespace}/${name}/my-rating`),
 
   domains: () => api.get<{ domain: string; count: number }[]>('/skills/domains/list'),
+
+  prefetchGithub: (url: string) =>
+    api.get<GithubPrefetchResult>('/skills/prefetch-github', { params: { url } }),
+
+  importFromGithub: (payload: GithubImportPayload) =>
+    api.post<SkillDetail>('/skills/import-github', payload),
 }
 
 // ── Plugin types ──────────────────────────────────────────────────────────────
