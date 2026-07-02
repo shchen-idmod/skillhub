@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Upload limits
     max_upload_mb: int = 10
 
+    # Optional GitHub token — raises rate limit from 60 to 5000 req/hour
+    github_token: str = ""
+
     @property
     def async_database_url(self) -> str:
         url = self.database_url
@@ -35,7 +38,7 @@ class Settings(BaseSettings):
         return url
 
     class Config:
-        env_file = ".env"
+        env_file = (".env", "../.env")
 
 
 @lru_cache
